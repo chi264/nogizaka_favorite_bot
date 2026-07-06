@@ -1,0 +1,38 @@
+name: Nogizaka Auto Notify
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/30 * * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements-nogizaka-notify.txt
+
+      - name: Check Nogizaka updates and notify Discord
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.NOGIZAKA_DISCORD_WEBHOOK_URL }}
+          NOTIFY_ON_FIRST_RUN: "false"
+        run: python scripts/nogizaka_notify.py
+
+      - name: Commit notification state
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Update Nogizaka notification state [skip ci]"
+          file_pattern: data/nogizaka_seen.json
