@@ -4,7 +4,7 @@ import json
 import os
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Callable, Iterable
@@ -37,21 +37,8 @@ ARTICLE_QUERIES = [
     "鈴木佑捺",
     "鈴木佑捺 乃木坂46",
     "鈴木佑捺 乃木坂46 6期生",
-    "鈴木佑捺 Lemino",
-    "鈴木佑捺 NHK",
-    "鈴木佑捺 乃木坂配信中",
-    "鈴木佑捺 インタビュー",
-    "鈴木佑捺 山梨",
-    "鈴木佑捺 日テレ",
-    "鈴木佑捺 乃木坂スター誕生",
-    "鈴木佑捺 テレ東",
-    "鈴木佑捺 乃木坂工事中",
-    "鈴木佑捺 FM FUJI",
-    "鈴木佑捺 DJ KOO",
-    "鈴木佑捺 ビートゴーズオン",
-    "鈴木佑捺 BEAT GOES ON",
-    "鈴木佑捺 6期生",
 ]
+ARTICLE_RECENT_DAYS = int(os.getenv("ARTICLE_RECENT_DAYS", "30"))
 
 
 @dataclass(frozen=True)
@@ -94,19 +81,26 @@ def now_jst_text() -> str:
 
 
 def published_to_jst(value: str) -> str:
+    dt = parse_datetime(value)
+    if not dt:
+        return value or ""
+    return dt.astimezone(JST).strftime("%Y-%m-%d %H:%M JST")
+
+
+def parse_datetime(value: str) -> datetime | None:
     if not value:
-        return ""
+        return None
     try:
         dt = parsedate_to_datetime(value)
     except (TypeError, ValueError):
         try:
             dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
         except ValueError:
-            return value
+            return None
 
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(JST).strftime("%Y-%m-%d %H:%M JST")
+    return dt
 
 
 def fetch_html(url: str) -> BeautifulSoup:
@@ -211,9 +205,15 @@ def google_news_feed_url(query: str) -> str:
 
 def fetch_article_items() -> list[Item]:
     items: list[Item] = []
+    recent_threshold = datetime.now(JST) - timedelta(days=ARTICLE_RECENT_DAYS)
     for query in ARTICLE_QUERIES:
         feed = feedparser.parse(google_news_feed_url(query))
         for entry in feed.entries[:10]:
+            published_raw = clean_text(entry.get("published", ""))
+            published_dt = parse_datetime(published_raw)
+            if published_dt and published_dt.astimezone(JST) < recent_threshold:
+                continue
+
             title = clean_html(entry.get("title", ""))
             summary = clean_html(entry.get("summary", ""))
             items.append(
@@ -221,7 +221,7 @@ def fetch_article_items() -> list[Item]:
                     source="各種記事",
                     title=title,
                     url=entry.get("link", ""),
-                    published=published_to_jst(clean_text(entry.get("published", ""))),
+                    published=published_to_jst(published_raw),
                     category="記事",
                     summary=summary[:500],
                 )
@@ -235,13 +235,34 @@ def webhook_url() -> str:
 
 def item_line(item: Item) -> str:
     date_part = f" / {item.published}" if item.published else ""
-    return f"- [{item.title}]({item.url}){date_part}"
+    title = item.title
+    if len(title) > 120:
+        title = title[:117].rstrip() + "..."
+    return f"- [{title}]({item.url}){date_part}"
 
 
-def truncate_field(value: str, limit: int = 1000) -> str:
-    if len(value) <= limit:
-        return value
-    return value[: limit - 20].rstrip() + "\n...ほか"
+def chunk_item_lines(items: list[Item], max_chars: int = 900) -> list[list[str]]:
+    chunks: list[list[str]] = []
+    current: list[str] = []
+    current_len = 0
+
+    for item in items:
+        line = item_line(item)
+        if len(line) > max_chars:
+            line = line[: max_chars - 3].rstrip() + "..."
+
+        added_len = len(line) + (1 if current else 0)
+        if current and current_len + added_len > max_chars:
+            chunks.append(current)
+            current = []
+            current_len = 0
+
+        current.append(line)
+        current_len += added_len
+
+    if current:
+        chunks.append(current)
+    return chunks
 
 
 def send_digest(notify_items: list[tuple[Item, list[str]]]) -> None:
@@ -256,32 +277,50 @@ def send_digest(notify_items: list[tuple[Item, list[str]]]) -> None:
         grouped.setdefault(item.source, []).append(item)
         members.update(favorite_members)
 
-    fields = []
+    pages: list[dict] = []
     for source, items in grouped.items():
-        lines = [item_line(item) for item in items[:8]]
-        if len(items) > 8:
-            lines.append(f"...ほか {len(items) - 8}件")
-        fields.append(
+        chunks = chunk_item_lines(items)
+        for chunk_index, lines in enumerate(chunks, start=1):
+            pages.append(
+                {
+                    "source": source,
+                    "source_count": len(items),
+                    "chunk_index": chunk_index,
+                    "chunk_count": len(chunks),
+                    "lines": lines,
+                }
+            )
+
+    embeds = []
+    total_pages = len(pages)
+    for page_index, page in enumerate(pages, start=1):
+        page_suffix = f" {page_index}/{total_pages}" if total_pages > 1 else ""
+        source_suffix = ""
+        if page["chunk_count"] > 1:
+            source_suffix = f" {page['chunk_index']}/{page['chunk_count']}"
+
+        embeds.append(
             {
-                "name": f"{source} ({len(items)}件)",
-                "value": truncate_field("\n".join(lines)),
-                "inline": False,
+                "title": f"鈴木佑捺さん関連 新着まとめ{page_suffix}",
+                "description": f"確認時刻: {now_jst_text()}\nメンバー: {'、'.join(sorted(members))}",
+                "color": 0xF1C40F,
+                "fields": [
+                    {
+                        "name": f"{page['source']} ({page['source_count']}件){source_suffix}",
+                        "value": "\n".join(page["lines"]),
+                        "inline": False,
+                    }
+                ],
             }
         )
 
-    payload = {
-        "username": "乃木坂46 推しメン通知",
-        "embeds": [
-            {
-                "title": f"鈴木佑捺さん関連 新着まとめ ({len(notify_items)}件)",
-                "description": f"確認時刻: {now_jst_text()}\nメンバー: {'、'.join(sorted(members))}",
-                "color": 0xF1C40F,
-                "fields": fields,
-            }
-        ],
-    }
-    response = requests.post(url, json=payload, timeout=20)
-    response.raise_for_status()
+    for start in range(0, len(embeds), 10):
+        payload = {
+            "username": "乃木坂46 推しメン通知",
+            "embeds": embeds[start : start + 10],
+        }
+        response = requests.post(url, json=payload, timeout=20)
+        response.raise_for_status()
 
 
 def send_log(message: str) -> None:
