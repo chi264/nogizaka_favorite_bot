@@ -29,6 +29,7 @@ jobs:
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.NOGIZAKA_DISCORD_WEBHOOK_URL }}
           NOTIFY_ON_FIRST_RUN: "false"
+          SEND_CHECK_LOG: ${{ github.event_name == 'workflow_dispatch' }}
         run: python scripts/nogizaka_notify.py
 
       - name: Commit notification state
