@@ -390,6 +390,15 @@ def main() -> None:
 
     message = f"乃木坂46自動通知: 送信 {len(notify_items)}件 / 通知なし既読 {skipped_count}件 / 確認 {now_jst_text()}"
     print(message)
+    if os.getenv("SEND_CHECK_LOG", "false").lower() == "true":
+        send_log(
+            "乃木坂46 推しメン通知 動作確認\n"
+            f"確認時刻: {now_jst_text()}\n"
+            f"新着通知: {len(notify_items)}件\n"
+            f"通知なし既読: {skipped_count}件\n"
+            "確認対象: 公式ブログ / 公式お知らせ / YouTube / 各種記事"
+        )
+        return
     if first_run and not notify_on_first_run:
         send_log(message + "\n初回実行のため、鈴木佑捺さん関連も通知せず既読登録しました。")
 
